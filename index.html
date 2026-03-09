@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Smart Target - Telemetry Logger</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background-color: #0a0a0a; color: white; margin: 0; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        .video-box { position: relative; width: 640px; height: 480px; max-width: 95vw; max-height: 50vh; border: 3px solid #444; border-radius: 12px; overflow: hidden; background: #111; margin-bottom: 20px;}
+        video { width: 100%; height: 100%; object-fit: fill; }
+        .controls { display: flex; gap: 15px; flex-wrap: wrap; justify-content: center; margin-bottom: 20px; }
+        button { font-size: 16px; font-weight: bold; padding: 15px 30px; border: none; border-radius: 8px; cursor: pointer; transition: 0.2s; color: white; }
+        #btnCam { background: #007bff; }
+        #btnRecord { background: #28a745; display: none; }
+        #btnRecord.recording { background: #ff3b30; animation: pulse 1.5s infinite; }
+        
+        .dashboard { width: 100%; max-width: 640px; background: #161616; padding: 15px; border-radius: 8px; border-left: 4px solid #00aaff; box-sizing: border-box;}
+        .stat-row { display: flex; justify-content: space-between; border-bottom: 1px solid #333; padding: 8px 0; font-family: monospace; font-size: 14px;}
+        
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
+    </style>
+</head>
+<body>
+
+    <h2 style="margin: 0 0 10px 0;">Synchronized Data Logger</h2>
+    <p id="status" style="color: #00ff00; margin-top: 0;">Waiting for Camera...</p>
+
+    <div class="video-box">
+        <video id="webcam" autoplay playsinline muted></video>
+    </div>
+
+    <div class="controls">
+        <button id="btnCam" onclick="startCamera()">1. Start Camera & Sensors</button>
+        <button id="btnRecord" onclick="toggleRecording()">2. Start Recording</button>
+    </div>
+
+    <div class="dashboard">
+        <div class="stat-row"><span>Status:</span> <span id="lblState" style="color:#aaa;">IDLE</span></div>
+        <div class="stat-row"><span>Time:</span> <span id="lblTime">0.00 s</span></div>
+        <div class="stat-row"><span>Sensor Points logged:</span> <span id="lblCount">0</span></div>
+    </div>
+
+<script>
+    let stream;
+    let mediaRecorder;
+    let recordedChunks = [];
+    
+    let isRecording = false;
+    let recordingStartTime = 0;
+    let sensorLog = []; // This will hold all our gyro data
+
+    // ==========================================
+    // 1. CAMERA & SENSOR INIT
+    // ==========================================
+    function startCamera() {
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: 640, height: 480 } })
+            .then(s => { 
+                stream = s;
+                document.getElementById('webcam').srcObject = stream; 
+                
+                document.getElementById('btnCam').style.display = 'none';
+                document.getElementById('btnRecord').style.display = 'block';
+                document.getElementById('status').innerText = "Camera Active. Ready to log.";
+                
+                enableSensors(); 
+            }).catch(e => {
+                document.getElementById('status').innerText = "Camera Error.";
+                console.error(e);
+            });
+    }
+
+    function enableSensors() {
+        if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+            DeviceMotionEvent.requestPermission()
+                .then(permissionState => {
+                    if (permissionState === 'granted') {
+                        window.addEventListener('devicemotion', handleMotion);
+                    } else {
+                        alert("Sensor Access Denied.");
+                    }
+                })
+                .catch(console.error);
+        } else {
+            window.addEventListener('devicemotion', handleMotion); 
+        }
+    }
+
+    // ==========================================
+    // 2. DATA ACQUISITION (DAQ)
+    // ==========================================
+    function handleMotion(event) {
+        if (!isRecording) return; 
+
+        // Get precise time relative to when recording started
+        let relativeTimeMs = performance.now() - recordingStartTime;
+
+        let ax = event.accelerationIncludingGravity?.x || event.acceleration?.x || 0;
+        let ay = event.accelerationIncludingGravity?.y || event.acceleration?.y || 0;
+        let az = event.accelerationIncludingGravity?.z || event.acceleration?.z || 0;
+        
+        let gx = event.rotationRate?.alpha || 0; 
+        let gy = event.rotationRate?.beta || 0;  
+        let gz = event.rotationRate?.gamma || 0; 
+
+        // Log the exact moment and physical state
+        sensorLog.push({
+            time_ms: Math.round(relativeTimeMs * 10) / 10, // Round to 1 decimal place
+            ax: ax, ay: ay, az: az,
+            gx: gx, gy: gy, gz: gz
+        });
+
+        // Update UI occasionally so we know it's working
+        if (sensorLog.length % 10 === 0) {
+            document.getElementById('lblCount').innerText = sensorLog.length;
+            document.getElementById('lblTime').innerText = (relativeTimeMs / 1000).toFixed(2) + " s";
+        }
+    }
+
+    // ==========================================
+    // 3. RECORDING & EXPORT
+    // ==========================================
+    function toggleRecording() {
+        let btn = document.getElementById('btnRecord');
+
+        if (!isRecording) {
+            // START RECORDING
+            recordedChunks = [];
+            sensorLog = [];
+            
+            // WebM is standard for Chrome/Android. MP4 is standard for Safari/iOS.
+            let options = { mimeType: 'video/webm; codecs=vp8' };
+            if (!MediaRecorder.isTypeSupported('video/webm; codecs=vp8')) {
+                options = { mimeType: 'video/mp4' }; // Fallback
+            }
+
+            mediaRecorder = new MediaRecorder(stream, options);
+
+            mediaRecorder.ondataavailable = function(e) {
+                if (e.data.size > 0) recordedChunks.push(e.data);
+            };
+
+            mediaRecorder.onstop = exportData;
+
+            // Start the clocks!
+            recordingStartTime = performance.now();
+            isRecording = true;
+            mediaRecorder.start();
+
+            btn.innerText = "Stop & Save Data";
+            btn.classList.add("recording");
+            document.getElementById('lblState').innerText = "RECORDING (Live)";
+            document.getElementById('lblState').style.color = "#ff3b30";
+
+        } else {
+            // STOP RECORDING
+            isRecording = false;
+            mediaRecorder.stop(); // This triggers exportData() automatically
+
+            btn.innerText = "2. Start Recording";
+            btn.classList.remove("recording");
+            document.getElementById('lblState').innerText = "EXPORTING...";
+            document.getElementById('lblState').style.color = "#00aaff";
+        }
+    }
+
+    function exportData() {
+        // 1. Export the Video
+        let videoBlob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
+        let videoUrl = URL.createObjectURL(videoBlob);
+        
+        // 2. Export the Sensor JSON
+        let jsonString = JSON.stringify(sensorLog, null, 2);
+        let jsonBlob = new Blob([jsonString], { type: "application/json" });
+        let jsonUrl = URL.createObjectURL(jsonBlob);
+
+        // 3. Create hidden download links to auto-download both files
+        let timestamp = new Date().getTime();
+        
+        let aVid = document.createElement("a");
+        aVid.href = videoUrl;
+        aVid.download = `session_${timestamp}.webm`;
+        document.body.appendChild(aVid);
+        aVid.click();
+
+        setTimeout(() => {
+            let aJson = document.createElement("a");
+            aJson.href = jsonUrl;
+            aJson.download = `session_${timestamp}.json`;
+            document.body.appendChild(aJson);
+            aJson.click();
+            
+            // Clean up
+            document.body.removeChild(aVid);
+            document.body.removeChild(aJson);
+            document.getElementById('lblState').innerText = "SAVED TO DEVICE";
+            document.getElementById('lblState').style.color = "#00ff00";
+        }, 500); // Slight delay so browser doesn't block second download
+    }
+</script>
+</body>
+</html>

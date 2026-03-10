@@ -31,7 +31,7 @@
         <h2 style="margin:0 0 10px 0;">Diagnostic Vision Engine</h2>
         <p id="status">Loading WASM...</p>
         <div class="video-box">
-            <video id="webcam" autoplay playsinline></video>
+            <video id="webcam" autoplay playsinline muted></video>
             <canvas id="overlayCanvas" class="overlay" width="640" height="480"></canvas>
         </div>
         <div style="margin-top: 15px;">
@@ -53,15 +53,23 @@
     let orb = null, matcher = null, refKP = null, refDesc = null, refGray = null;
     let cropSize = 0, targetRadius = 0, persistentShots = [], candidates = [], blacklist = [];
     
-    // NEW: Global variable to hold the true relative center of the target
+    // Global variable to hold the true relative center of the target
     let targetCenter = { x: 0, y: 0 };
     
     const PROXIMITY = 15.0, REQ_FRAMES = 5; 
 
     function onOpenCvReady() {
         document.getElementById('status').innerText = "OpenCV Ready.";
-        navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
-            .then(s => { document.getElementById('webcam').srcObject = s; document.getElementById('btnBase').disabled = false; });
+        // RESTORED: facingMode: "environment" points to the back camera
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: 640, height: 480 } })
+            .then(s => { 
+                document.getElementById('webcam').srcObject = s; 
+                document.getElementById('btnBase').disabled = false; 
+            })
+            .catch(e => {
+                console.error("Camera error:", e);
+                document.getElementById('status').innerText = "Camera access denied.";
+            });
     }
 
     function grab() {
@@ -92,14 +100,14 @@
         targetRadius = Math.round(best.radius);
         cropSize = targetRadius * 2 + 60;
         
-        // FIX 1: Safely calculate bounds so we don't crash if the target is near the screen edge
+        // Safely calculate bounds so we don't crash if the target is near the screen edge
         let rx = Math.max(0, best.center.x - cropSize/2);
         let ry = Math.max(0, best.center.y - cropSize/2);
         let rw = Math.min(640 - rx, cropSize);
         let rh = Math.min(480 - ry, cropSize);
         let rect = new cv.Rect(rx, ry, rw, rh);
         
-        // FIX 2: Store the exact sub-pixel center of the target relative to our new cropped box
+        // Store the exact sub-pixel center of the target relative to our new cropped box
         targetCenter = { x: best.center.x - rx, y: best.center.y - ry };
 
         let roi = frame.roi(rect);
@@ -108,7 +116,6 @@
         cv.cvtColor(roi, refGray, cv.COLOR_RGBA2GRAY);
         
         let mask = cv.Mat.zeros(roi.rows, roi.cols, cv.CV_8UC1);
-        // Apply mask to the TRUE center, not just cols/2
         cv.circle(mask, new cv.Point(targetCenter.x, targetCenter.y), targetRadius - 15, new cv.Scalar(255), -1);
         orb.detectAndCompute(refGray, mask, refKP, refDesc);
 
@@ -152,7 +159,6 @@
                         cv.threshold(diff, thresh, 40, 255, cv.THRESH_BINARY);
 
                         let liveMask = cv.Mat.zeros(refGray.rows, refGray.cols, cv.CV_8UC1);
-                        // FIX 3: Shrink the dynamic live mask slightly more (-20) and anchor to true center
                         cv.circle(liveMask, new cv.Point(targetCenter.x, targetCenter.y), targetRadius - 20, new cv.Scalar(255), -1);
                         let maskedThresh = new cv.Mat();
                         thresh.copyTo(maskedThresh, liveMask);
@@ -170,7 +176,7 @@
                                 let M = cv.moments(cnt);
                                 let p = {x: M.m10/M.m00, y: M.m01/M.m00};
                                 
-                                // FIX 4: The Hard Distance Filter. If it is mathematically outside the paper bounds, kill it immediately.
+                                // The Hard Distance Filter
                                 let distFromCenter = Math.hypot(p.x - targetCenter.x, p.y - targetCenter.y);
                                 if (distFromCenter > targetRadius - 20) continue; 
 
@@ -218,7 +224,6 @@
     }
 
     function getDiag(x, y) {
-        // FIX 5: Diagnosis now properly hinges off the True Center, making High/Low/Left/Right 100% accurate
         let dx = x - targetCenter.x, dy = targetCenter.y - y;
         let a = Math.atan2(dy, dx) * (180/Math.PI); if(a < 0) a += 360;
         

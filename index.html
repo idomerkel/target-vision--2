@@ -15,10 +15,13 @@
         video, canvas.overlay { position: absolute; width: 100%; height: 100%; top: 0; left: 0; object-fit: fill; }
         canvas.overlay { pointer-events: none; z-index: 10; }
         button { background: #007bff; color: white; border: none; padding: 12px 24px; font-size: 14px; cursor: pointer; border-radius: 6px; font-weight: bold; margin: 5px; transition: background 0.3s; }
+        
+        /* Highlight disabled buttons clearly so the user knows they can't click them yet */
         button:disabled { background: #444 !important; color: #888; cursor: not-allowed; }
+        
         #btnRecord.recording { background: #ff3b30; animation: pulse 1.5s infinite; }
-        #status { font-weight: bold; font-size: 14px; color: #00ff00; margin-bottom: 10px; text-align: center; text-transform: uppercase; transition: color 0.3s;}
-        .debug-view { width: 160px; height: 120px; border: 2px solid #555; border-radius: 4px; background: #000; margin-top: 10px; }
+        #status { font-weight: bold; font-size: 14px; color: #00ff00; margin-bottom: 10px; text-align: center; text-transform: uppercase; transition: color 0.3s; }
+        .debug-view { width: 160px; height: 120px; border: 2px solid #555; background: #000; margin-top: 10px; border-radius: 4px; }
         
         .dashboard { display: flex; width: 400px; flex-direction: column; background: #161616; padding: 15px; overflow-y: auto; border-left: 2px solid #333; }
         .graph-container { width: 100%; height: 120px; background: #000; border: 1px solid #444; border-radius: 6px; margin-bottom: 15px; position: relative; flex-shrink: 0; }
@@ -78,9 +81,12 @@
     <canvas id="calcCanvas" width="640" height="480" style="display:none;"></canvas>
 
 <script>
+    // ==========================================
+    // GLOBAL ARCHITECTURE
+    // ==========================================
     let isRecording = false;
     let isAnalyzing = false;
-    let isPreviewing = false; 
+    let isPreviewing = false; // Controls the Live HUD
     
     let stream;
     let mediaRecorder;
@@ -110,6 +116,7 @@
 
     function onOpenCvReady() {
         document.getElementById('status').innerText = "System Ready.";
+        
         const canvas = document.getElementById('gyroGraph');
         const ctx = canvas.getContext('2d');
         ctx.strokeStyle = '#333';
@@ -118,6 +125,9 @@
         ctx.fillText("Graph will generate after recording stops.", 10, 30);
     }
 
+    // ==========================================
+    // 1. DATA ACQUISITION & SENSORS
+    // ==========================================
     function startCamera() {
         navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: 640, height: 480 } })
             .then(s => { 
@@ -125,6 +135,7 @@
                 document.getElementById('webcam').srcObject = stream; 
                 document.getElementById('btnCam').style.display = 'none';
                 
+                // Fire up the target-hunting HUD instantly
                 isPreviewing = true;
                 previewLoop();
                 
@@ -163,6 +174,9 @@
         return cv.imread(cvs);
     }
 
+    // ==========================================
+    // 2. TARGET LOCKING HUD SYSTEM
+    // ==========================================
     function previewLoop() {
         if (!isPreviewing) return;
 
@@ -171,11 +185,12 @@
         cv.cvtColor(frame, gray, cv.COLOR_RGBA2GRAY);
         cv.adaptiveThreshold(gray, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 15, 5);
         
+        // Show what the engine sees in the debug box
         cv.imshow('debugCanvas', thresh);
 
         let contours = new cv.MatVector(), hierarchy = new cv.Mat();
         
-        // FIX: RETR_LIST allows OpenCV to look inside the paper border to find the actual target circles
+        // Using RETR_LIST so it ignores the paper bounds and finds the circular ink
         cv.findContours(thresh, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
         
         let best = null, maxA = 0;
@@ -186,7 +201,8 @@
             if (a > 3000) {
                 let rect = cv.boundingRect(cnt);
                 let aspect = rect.width / rect.height;
-                // Expanded aspect ratio slightly to account for holding the phone at a slight angle
+                
+                // Allow a tiny bit of tilt, but enforce circularity
                 if(aspect > 0.75 && aspect < 1.3 && a > maxA) { 
                     maxA = a; 
                     best = cv.minEnclosingCircle(cnt); 
@@ -201,12 +217,14 @@
         let statusTxt = document.getElementById('status');
 
         if (best) {
+            // Draw Target Reticle
             ctx.beginPath();
             ctx.arc(best.center.x, best.center.y, best.radius, 0, 2 * Math.PI);
             ctx.lineWidth = 3;
             ctx.strokeStyle = 'rgba(0, 255, 0, 0.8)';
             ctx.stroke();
 
+            // Draw Crosshairs
             ctx.beginPath();
             ctx.moveTo(best.center.x - 15, best.center.y);
             ctx.lineTo(best.center.x + 15, best.center.y);
@@ -215,12 +233,15 @@
             ctx.strokeStyle = 'rgba(0, 255, 0, 0.8)';
             ctx.stroke();
 
+            // Wake up the Lock Button
             btnBase.disabled = false;
             btnBase.style.background = "#28a745"; 
             statusTxt.innerText = "TARGET ACQUIRED - READY TO LOCK";
             statusTxt.style.color = "#00ff00";
         } else {
+            // Freeze the Lock Button
             btnBase.disabled = true;
+            btnBase.style.background = ""; 
             statusTxt.innerText = "SEARCHING... ALIGN TARGET IN CAMERA";
             statusTxt.style.color = "#ffaa00"; 
         }
@@ -230,7 +251,11 @@
         if (isPreviewing) requestAnimationFrame(previewLoop);
     }
 
+    // ==========================================
+    // 3. BASELINE MATH
+    // ==========================================
     function setBaseline() {
+        // Stop drawing the live HUD
         isPreviewing = false; 
         document.getElementById('overlayCanvas').getContext('2d').clearRect(0,0,640,480);
 
@@ -244,7 +269,7 @@
         cv.adaptiveThreshold(gray, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 15, 5);
         let contours = new cv.MatVector(), hierarchy = new cv.Mat();
         
-        // FIX: Also applied RETR_LIST here for the actual math lock
+        // Again, use RETR_LIST to pierce through the paper border
         cv.findContours(thresh, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
         
         let best = null, maxA = 0;
@@ -260,7 +285,15 @@
                 }
             }
         }
-        if(!best) { alert("Error: Target lost during lock."); frame.delete(); gray.delete(); thresh.delete(); isPreviewing = true; previewLoop(); return; }
+        
+        // If the user managed to hit lock right as a shadow broke the image
+        if(!best) { 
+            alert("Error: Target lost during lock. Please try again."); 
+            frame.delete(); gray.delete(); thresh.delete(); 
+            isPreviewing = true; 
+            previewLoop(); 
+            return; 
+        }
 
         targetRadius = Math.round(best.radius);
         cropSize = targetRadius * 2 + 60;
@@ -290,6 +323,10 @@
         frame.delete(); gray.delete(); thresh.delete(); contours.delete(); hierarchy.delete(); mask.delete(); roi.delete();
     }
 
+
+    // ==========================================
+    // 4. POST-PROCESS RECORDING FLOW
+    // ==========================================
     function toggleRecording() {
         let btn = document.getElementById('btnRecord');
 
@@ -371,14 +408,21 @@
         document.getElementById('overlayCanvas').getContext('2d').clearRect(0,0,640,480);
         
         let btn = document.getElementById('btnRecord');
+        btn.style.display = 'none';
         btn.style.background = "#28a745";
         btn.innerText = "3. Record Session";
         btn.onclick = toggleRecording;
-        
+
+        // Wake the Lock button and HUD up again
+        document.getElementById('btnBase').style.display = 'inline-block';
         isPreviewing = true;
         previewLoop();
     }
 
+
+    // ==========================================
+    // 5. THE PHYSICS & VISION MATH
+    // ==========================================
     function drawRecordedGraph() {
         const canvas = document.getElementById('gyroGraph');
         if (!canvas || sensorLog.length === 0) return;
@@ -504,10 +548,9 @@
                             cv.absdiff(refBlur, warpedBlur, diff);
                             cv.threshold(diff, thresh, 50, 255, cv.THRESH_BINARY);
 
-                            // Calculate the 94% boundary limits
-                            let maxShotRadius = targetRadius * 0.94;
                             let liveMask = cv.Mat.zeros(refGray.rows, refGray.cols, cv.CV_8UC1);
-                            cv.circle(liveMask, new cv.Point(targetCenter.x, targetCenter.y), maxShotRadius, new cv.Scalar(255), -1);
+                            // Only look for holes strictly inside the circle boundaries
+                            cv.circle(liveMask, new cv.Point(targetCenter.x, targetCenter.y), targetRadius - 15, new cv.Scalar(255), -1);
                             
                             let maskedThresh = new cv.Mat();
                             thresh.copyTo(maskedThresh, liveMask);
@@ -525,9 +568,9 @@
                                     let M = cv.moments(cnt);
                                     let p = {x: M.m10/M.m00, y: M.m01/M.m00};
                                     
-                                    // Instantly reject holes that touch the paper boundary
+                                    // The hard mathematical boundary check
                                     let distFromCenter = Math.hypot(p.x - targetCenter.x, p.y - targetCenter.y);
-                                    if (distFromCenter > maxShotRadius) continue; 
+                                    if (distFromCenter > targetRadius - 15) continue; 
 
                                     if(blacklist.some(b => Math.hypot(b.x-p.x, b.y-p.y) < PROXIMITY)) continue;
 

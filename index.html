@@ -78,9 +78,6 @@
     <canvas id="calcCanvas" width="640" height="480" style="display:none;"></canvas>
 
 <script>
-    // ==========================================
-    // GLOBAL ARCHITECTURE
-    // ==========================================
     let isRecording = false;
     let isAnalyzing = false;
     
@@ -112,8 +109,6 @@
 
     function onOpenCvReady() {
         document.getElementById('status').innerText = "System Ready.";
-        
-        // Setup initial blank graph
         const canvas = document.getElementById('gyroGraph');
         const ctx = canvas.getContext('2d');
         ctx.strokeStyle = '#333';
@@ -122,9 +117,6 @@
         ctx.fillText("Graph will generate after recording stops.", 10, 30);
     }
 
-    // ==========================================
-    // 1. DATA ACQUISITION 
-    // ==========================================
     function startCamera() {
         navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: 640, height: 480 } })
             .then(s => { 
@@ -134,7 +126,6 @@
                 document.getElementById('btnCam').style.display = 'none';
                 document.getElementById('status').innerText = "Camera Active. Lock target.";
                 
-                // Request sensor permission quietly in the background
                 if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
                     DeviceMotionEvent.requestPermission().then(state => {
                         if (state === 'granted') window.addEventListener('devicemotion', handleMotion);
@@ -148,7 +139,6 @@
             });
     }
 
-    // Only log data when physically recording
     function handleMotion(event) {
         if (!isRecording) return; 
 
@@ -165,9 +155,6 @@
         });
     }
 
-    // ==========================================
-    // 2. VISION BASELINE (TRUE CENTER MATH)
-    // ==========================================
     function grab() {
         let cvs = document.getElementById('calcCanvas');
         cvs.getContext('2d').drawImage(document.getElementById('webcam'), 0,0,640,480);
@@ -188,10 +175,19 @@
         
         let best = null, maxA = 0;
         for(let i=0; i<contours.size(); i++) {
-            let a = cv.contourArea(contours.get(i));
-            if(a > 3000 && a > maxA) { maxA = a; best = cv.minEnclosingCircle(contours.get(i)); }
+            let cnt = contours.get(i);
+            let a = cv.contourArea(cnt);
+            
+            // FIX 1: Aspect Ratio Filter. Ignores rectangular paper, forces lock onto concentric printed target rings.
+            let rect = cv.boundingRect(cnt);
+            let aspect = rect.width / rect.height;
+
+            if(a > 3000 && a > maxA && aspect > 0.8 && aspect < 1.2) { 
+                maxA = a; 
+                best = cv.minEnclosingCircle(cnt); 
+            }
         }
-        if(!best) { alert("Center target!"); frame.delete(); gray.delete(); thresh.delete(); return; }
+        if(!best) { alert("Center target! Make sure target rings are visible."); frame.delete(); gray.delete(); thresh.delete(); return; }
 
         targetRadius = Math.round(best.radius);
         cropSize = targetRadius * 2 + 60;
@@ -220,10 +216,6 @@
         frame.delete(); gray.delete(); thresh.delete(); contours.delete(); hierarchy.delete(); mask.delete(); roi.delete();
     }
 
-
-    // ==========================================
-    // 3. POST-PROCESS RECORDING FLOW
-    // ==========================================
     function toggleRecording() {
         let btn = document.getElementById('btnRecord');
 
@@ -235,7 +227,6 @@
             document.getElementById('kinematicList').innerHTML = "";
             document.getElementById('overlayCanvas').getContext('2d').clearRect(0,0,640,480);
             
-            // Clear the graph area
             const canvas = document.getElementById('gyroGraph');
             canvas.getContext('2d').clearRect(0,0,canvas.width, canvas.height);
 
@@ -266,13 +257,9 @@
         document.getElementById('status').innerText = "⚙️ ANALYZING DATA...";
         document.getElementById('status').style.color = "#00aaff";
 
-        // 1. Plot the entire recorded telemetry graph
         drawRecordedGraph();
-
-        // 2. Instantly process all physical recoils
         processEntireSensorLog();
 
-        // 3. Play video to process visual holes
         let videoBlob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
         let videoURL = URL.createObjectURL(videoBlob);
         
@@ -318,9 +305,6 @@
         document.getElementById('status').style.color = "#00ff00";
     }
 
-    // ==========================================
-    // 4. THE PHYSICS & VISION MATH
-    // ==========================================
     function drawRecordedGraph() {
         const canvas = document.getElementById('gyroGraph');
         if (!canvas || sensorLog.length === 0) return;
@@ -331,12 +315,11 @@
         ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(0, canvas.height/2); ctx.lineTo(canvas.width, canvas.height/2); ctx.stroke();
 
-        // Fit the entire session exactly into the canvas width
         const step = canvas.width / sensorLog.length;
 
         function plotLine(key, color, scaleMultiplier, offset = 0) {
             ctx.strokeStyle = color;
-            ctx.lineWidth = 1.0; // Thinner lines for full-session overview
+            ctx.lineWidth = 1.0; 
             ctx.beginPath();
             for (let i = 0; i < sensorLog.length; i++) {
                 let val = (sensorLog[i][key] || 0) - offset; 
@@ -445,11 +428,13 @@
 
                             let diff = new cv.Mat(), thresh = new cv.Mat();
                             cv.absdiff(refBlur, warpedBlur, diff);
-                            
                             cv.threshold(diff, thresh, 50, 255, cv.THRESH_BINARY);
 
+                            // FIX 2: Strict Dynamic Playback Mask. 
+                            let maxShotRadius = targetRadius * 0.94; // 6% safety margin completely blocks outer edge bleeding
                             let liveMask = cv.Mat.zeros(refGray.rows, refGray.cols, cv.CV_8UC1);
-                            cv.circle(liveMask, new cv.Point(targetCenter.x, targetCenter.y), targetRadius - 15, new cv.Scalar(255), -1);
+                            cv.circle(liveMask, new cv.Point(targetCenter.x, targetCenter.y), maxShotRadius, new cv.Scalar(255), -1);
+                            
                             let maskedThresh = new cv.Mat();
                             thresh.copyTo(maskedThresh, liveMask);
 
@@ -466,9 +451,9 @@
                                     let M = cv.moments(cnt);
                                     let p = {x: M.m10/M.m00, y: M.m01/M.m00};
                                     
-                                    // THE HARD BOUNDARY FILTER: Delete anything outside the paper
+                                    // FIX 3: The Ultimate Mathematical Distance Filter. Deletes shapes attempting to form outside the 94% zone.
                                     let distFromCenter = Math.hypot(p.x - targetCenter.x, p.y - targetCenter.y);
-                                    if (distFromCenter > targetRadius - 15) continue; 
+                                    if (distFromCenter > maxShotRadius) continue; 
 
                                     if(blacklist.some(b => Math.hypot(b.x-p.x, b.y-p.y) < PROXIMITY)) continue;
 
